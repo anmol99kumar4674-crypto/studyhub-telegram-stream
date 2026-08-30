@@ -23,7 +23,15 @@ def authorized(request: Request):
 
 @app.on_event("startup")
 async def startup():
-    await client.start()
+    # Never use client.start() on Render: it can enter an interactive
+    # phone/code prompt when the StringSession is missing or invalid.
+    if not SESSION.strip():
+        raise RuntimeError("TELEGRAM_SESSION is empty. Generate a Telethon StringSession and set it in Render Environment Variables.")
+
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        raise RuntimeError("TELEGRAM_SESSION is invalid or not authorized. Generate a fresh Telethon StringSession and replace the Render variable.")
 
 
 @app.on_event("shutdown")
