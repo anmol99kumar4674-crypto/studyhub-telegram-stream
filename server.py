@@ -43,6 +43,21 @@ async def health():
     return {"ok": True}
 
 
+@app.options("/video/{message_id}")
+async def video_options(request: Request, message_id: int):
+    authorized(request)
+    return StreamingResponse(
+        iter(()),
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Range, X-Stream-Key, Content-Type",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        },
+    )
+
+
 @app.get("/video/{message_id}")
 async def video(request: Request, message_id: int, chat: str):
     authorized(request)
@@ -83,31 +98,34 @@ async def video(request: Request, message_id: int, chat: str):
     length = end - start + 1
 
     async def body():
-        # Telethon downloads in chunks and yields them immediately.
-        # This avoids loading the whole 500–600 MB file into RAM.
-        offset = start
+        # Stream only the requested Range in chunks; never buffer the whole file.
         remaining = length
+        offset = start
         chunk_size = 1024 * 1024
 
-        while remaining > 0:
-            take = min(chunk_size, remaining)
-            data = await client.download_media(
-                message,
-                file=bytes,
-                offset=offset,
-                limit=take,
-            )
-            if not data:
+        async for data in client.iter_download(
+            message.media,
+            offset=offset,
+            request_size=chunk_size,
+            chunk_size=chunk_size,
+        ):
+            if not remaining:
                 break
+            if len(data) > remaining:
+                data = data[:remaining]
             yield data
             got = len(data)
             offset += got
             remaining -= got
+            if got <= 0:
+                break
 
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Type": mime,
-        "Cache-Control": "private, no-store",
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
     }
 
     if size:
