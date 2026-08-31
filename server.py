@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,7 +18,10 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
 
 def authorized(request: Request):
-    if STREAM_KEY and request.headers.get("x-stream-key") != STREAM_KEY:
+    # Normal HTML <video> requests cannot set a custom header.
+    # Accept the same key as ?key=... for direct browser playback.
+    supplied = request.headers.get("x-stream-key") or request.query_params.get("key")
+    if STREAM_KEY and supplied != STREAM_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -41,7 +45,30 @@ async def shutdown():
 
 async def get_message(message_id: int, chat: str):
     try:
-        return await client.get_messages(chat, ids=message_id)
+        # Try the supplied ID first, then the common -100 channel-ID form.
+        candidates = [chat]
+        if re.fullmatch(r"-?\d+", chat):
+            n = int(chat)
+            if n > 0:
+                candidates.append(f"-100{n}")
+            elif not chat.startswith("-100"):
+                candidates.append(f"-100{abs(n)}")
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                message = await client.get_messages(candidate, ids=message_id)
+                if message:
+                    return message
+            except Exception as e:
+                last_error = e
+
+        raise HTTPException(
+            status_code=404,
+            detail=f"Telegram message not found. Check channel ID and session authorization. {last_error or ''}"
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Telegram message not found: {e}")
 
