@@ -133,30 +133,48 @@ async def video(request: Request, message_id: int, chat: str):
     length = end - start + 1
 
     async def body():
-        # Stream only the requested Range in chunks; never buffer the whole file.
+        # Stream only the requested range. A small first chunk improves startup;
+        # subsequent chunks are larger to improve throughput.
         remaining = length
         offset = start
-        chunk_size = 1024 * 1024
+        first_chunk = 512 * 1024
+        normal_chunk = 2 * 1024 * 1024
+        first = True
 
-        async for data in client.iter_download(
-            message.media,
-            offset=offset,
-            request_size=chunk_size,
-            chunk_size=chunk_size,
-        ):
-            if not remaining:
-                break
-            if len(data) > remaining:
-                data = data[:remaining]
-            yield data
-            got = len(data)
-            offset += got
-            remaining -= got
-            if got <= 0:
+        while remaining > 0:
+            request_size = min(first_chunk if first else normal_chunk, remaining)
+
+            # Telethon's iter_download yields media chunks without buffering
+            # the complete Telegram file in memory.
+            got_any = False
+            async for data in client.iter_download(
+                message.media,
+                offset=offset,
+                request_size=request_size,
+                chunk_size=request_size,
+            ):
+                if not data:
+                    break
+
+                if len(data) > remaining:
+                    data = data[:remaining]
+
+                yield data
+                got = len(data)
+                offset += got
+                remaining -= got
+                got_any = True
+                first = False
+
+                if remaining <= 0:
+                    break
+
+            if not got_any:
                 break
 
     headers = {
         "Accept-Ranges": "bytes",
+        "Connection": "keep-alive",
         "Content-Type": mime,
         "Cache-Control": "private, no-store, no-cache, must-revalidate",
         "Access-Control-Allow-Origin": "*",
