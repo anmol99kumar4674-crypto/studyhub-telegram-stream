@@ -169,8 +169,10 @@ async def video(request: Request, message_id: int, chat: str):
         # so the player can begin quickly, then use larger chunks for throughput.
         remaining = length
         offset = start
-        first_chunk = 1024 * 1024
-        normal_chunk = 4 * 1024 * 1024
+        # Telegram GetFile requests have a 512 KiB maximum. Larger
+        # request_size values can make the generator fail before playback.
+        first_chunk = 512 * 1024
+        normal_chunk = 512 * 1024
         first = True
 
         while remaining > 0:
@@ -184,7 +186,6 @@ async def video(request: Request, message_id: int, chat: str):
                 offset=offset,
                 request_size=request_size,
                 chunk_size=request_size,
-                stride=1,
             ):
                 if not data:
                     break
