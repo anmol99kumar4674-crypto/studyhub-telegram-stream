@@ -171,7 +171,10 @@ async def video(request: Request, message_id: int, chat: str):
         offset = start
         # Telegram GetFile requests have a 512 KiB maximum. Larger
         # request_size values can make the generator fail before playback.
-        first_chunk = 512 * 1024
+        # Keep the first Telegram fetch small so mobile users receive the
+        # first playable bytes quickly. Larger requests are used afterwards
+        # for better sustained throughput.
+        first_chunk = 64 * 1024
         normal_chunk = 512 * 1024
         first = True
 
@@ -212,7 +215,7 @@ async def video(request: Request, message_id: int, chat: str):
         "Content-Type": mime,
         # Telegram is the origin, so don't ask the browser to cache the whole
         # stream. Keep connections reusable for sequential range requests.
-        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Cache-Control": "private, max-age=300, stale-while-revalidate=60",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
     }
