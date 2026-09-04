@@ -1,7 +1,5 @@
 import os
 import re
-import asyncio
-from time import monotonic
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,20 +14,7 @@ API_HASH = os.environ["TELEGRAM_API_HASH"]
 SESSION = os.environ["TELEGRAM_SESSION"]
 STREAM_KEY = os.environ.get("STREAM_KEY", "")
 
-client = TelegramClient(
-    StringSession(SESSION),
-    API_ID,
-    API_HASH,
-    connection_retries=3,
-    retry_delay=1,
-)
-
-# Avoid a Telegram API lookup every time the browser opens a new HTTP range.
-# The message object is immutable enough for streaming purposes and is cached
-# briefly per process. This substantially reduces startup latency.
-_MESSAGE_CACHE = {}
-_MESSAGE_CACHE_TTL = 300  # seconds
-_MESSAGE_LOCKS = {}
+client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
 
 def authorized(request: Request):
@@ -59,50 +44,33 @@ async def shutdown():
 
 
 async def get_message(message_id: int, chat: str):
-    cache_key = (str(chat), int(message_id))
-    now = monotonic()
-    cached = _MESSAGE_CACHE.get(cache_key)
-    if cached and now - cached[0] < _MESSAGE_CACHE_TTL:
-        return cached[1]
+    try:
+        # Try the supplied ID first, then the common -100 channel-ID form.
+        candidates = [chat]
+        if re.fullmatch(r"-?\d+", chat):
+            n = int(chat)
+            if n > 0:
+                candidates.append(f"-100{n}")
+            elif not chat.startswith("-100"):
+                candidates.append(f"-100{abs(n)}")
 
-    # Prevent several simultaneous browser range requests from all doing the
-    # same Telegram get_messages call during startup.
-    lock = _MESSAGE_LOCKS.setdefault(cache_key, asyncio.Lock())
-    async with lock:
-        cached = _MESSAGE_CACHE.get(cache_key)
-        if cached and monotonic() - cached[0] < _MESSAGE_CACHE_TTL:
-            return cached[1]
+        last_error = None
+        for candidate in candidates:
+            try:
+                message = await client.get_messages(candidate, ids=message_id)
+                if message:
+                    return message
+            except Exception as e:
+                last_error = e
 
-        try:
-            # Try the supplied ID first, then the common -100 channel-ID form.
-            candidates = [chat]
-            if re.fullmatch(r"-?\d+", chat):
-                n = int(chat)
-                if n > 0:
-                    candidates.append(f"-100{n}")
-                elif not chat.startswith("-100"):
-                    candidates.append(f"-100{abs(n)}")
-
-            last_error = None
-            for candidate in candidates:
-                try:
-                    message = await client.get_messages(candidate, ids=message_id)
-                    if message:
-                        _MESSAGE_CACHE[cache_key] = (monotonic(), message)
-                        return message
-                except Exception as e:
-                    last_error = e
-
-            raise HTTPException(
-                status_code=404,
-                detail=f"Telegram message not found. Check channel ID and session authorization. {last_error or ''}"
-            )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=f"Telegram message not found: {e}")
-        finally:
-            _MESSAGE_LOCKS.pop(cache_key, None)
+        raise HTTPException(
+            status_code=404,
+            detail=f"Telegram message not found. Check channel ID and session authorization. {last_error or ''}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Telegram message not found: {e}")
 
 
 @app.get("/health")
@@ -165,14 +133,12 @@ async def video(request: Request, message_id: int, chat: str):
     length = end - start + 1
 
     async def body():
-        # Stream only the requested range. Start with a reasonably sized chunk
-        # so the player can begin quickly, then use larger chunks for throughput.
+        # Stream only the requested range. A small first chunk improves startup;
+        # subsequent chunks are larger to improve throughput.
         remaining = length
         offset = start
-        # Telegram GetFile requests have a 512 KiB maximum. Larger
-        # request_size values can make the generator fail before playback.
         first_chunk = 512 * 1024
-        normal_chunk = 512 * 1024
+        normal_chunk = 2 * 1024 * 1024
         first = True
 
         while remaining > 0:
@@ -210,9 +176,7 @@ async def video(request: Request, message_id: int, chat: str):
         "Accept-Ranges": "bytes",
         "Connection": "keep-alive",
         "Content-Type": mime,
-        # Telegram is the origin, so don't ask the browser to cache the whole
-        # stream. Keep connections reusable for sequential range requests.
-        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
     }
